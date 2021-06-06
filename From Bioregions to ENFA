@@ -1,0 +1,237 @@
+# packages utilized -------------------------------------------------------
+
+library(ape)
+library(tidyr)
+library(dplyr)
+library(raster)
+library(maptools)
+library(rgdal)
+library(stringr)
+library(rgeos)
+library(cleangeo)
+library(CENFA)
+
+
+# Complementary functions -------------------------------------------------
+
+##polygon.validity is a function to check if the polygons are adequate for rgeos package
+polygon.validity <- function(l.spol){
+  ##l.spol= list with spatial polygons
+  if(sum(sapply(l.spol, function(x) gIsValid(x))==FALSE)==0){
+    return(l.spol) ##does not need any modification
+  } else{
+    l.spol.1 <- lapply(l.spol, function(x) gSimplify(x, tol = 0.00001))
+    l.spol.2 <- lapply(l.spol.1, function(x) gBuffer(x, byid=TRUE, width=0))
+    return(l.spol.2)
+  }
+}
+
+##iterate function for collapsing a spatialpolygon data frame in a list containing multiple
+## lists with each containing a polygon. 
+
+iterate <- function(x){
+  bio.sp <- list()
+  for(i in 1:length(x)){
+    bio.sp[[i]] <- x[i,]
+  }
+  return(bio.sp)
+}
+
+##Exclude the polygons which have an area lower than 0.11, due to not
+##running in ENFA
+
+exclude.polygons <- function(x){
+  ##x = list containing bioregion with polygons
+  
+  ##empty vector for storing logical values 
+  vt <- numeric()
+  
+  ##loop for determining the minimal area for enfa
+  for(i in 1:length(x)){
+    vt[i] <- gArea(x[[i]]) > 0.11
+  }
+  
+  ##vector for determining the polygons which do
+  ##no satisfy the minimal area requirement
+  ex <- which(vt == 0)
+  
+  ##excluding ranges 
+  if(length(ex) == 0){
+    return(x)
+  } else {
+    x1 <- x[-ex]
+    
+    return(x1)
+  }
+  
+}
+
+##Define the sp (position) that should be excluded polygons because 
+##they have an area lower than 0.11
+
+exclude.sp <- function(x){
+  ##x = list containing bioregion with polygons
+  
+  ##empty vector for storing logical values 
+  vt <- numeric()
+  
+  ##loop for determining the minimal area for enfa
+  for(i in 1:length(x)){
+    vt[i] <- gArea(x[[i]]) > 0.11
+  }
+  ex <- which(vt == 0)
+  return(ex)
+  
+}
+
+# principal function ----------------------------------------------------------------
+
+enfa.bioregion <- function(sp, dsm, bior, PAB, w){
+  #sp.original = species names dataframe
+  #dsm = distribution species model. spatial polygons
+  #bio = large SpatialPolygonsDataFrame (output from infomap)
+  #PAB = Presence abscence matrix of the bioregions (output from infomap)
+  #w = weather raster brick
+  
+
+# selecting the ranges and species present in each bioregion --------------
+
+  #an empty list to save the sp present in the different bioregions
+  bio.species <- list()
+  
+  ##loop for selecting and filtering the sp present in each bioregion
+  for(i in 1:(ncol(PAB)-1)){
+    bio.species[[i]] <- select(PAB, species, paste0("bio",i))%>%
+      filter(.[2] == 1)
+  }
+  
+  #an empty list to save vectors indicating the position of each sp 
+  #in the original dsm for each bioregion
+  sp.position <- list()
+  
+  ##loop for selecting and storing each position vector
+  for(i in 1:length(bio.species)){
+    sp.position[[i]] <- which(sp$species %in% bio.species[[i]]$species)
+  }
+  
+  ########select the sp ranges of each bioregion
+  
+  ##empty list
+  bio.ranges<- list()
+  
+  ##loop for selecting the sp ranges of each bioregion
+  for(i in 1:length(sp.position)){
+    bio.ranges[[i]]<- SpatialPolygonsDataFrame(dsm[sp.position[[i]],], 
+                                           sp[sp.position[[i]],], match.ID = FALSE)
+  }
+  
+
+# arranging bioregions into a list ----------------------------------------
+
+  ##empty list for saving bioregions
+  bioregions <- list()
+  
+  ##loop for selecting each bioregion
+  for(i in 1:length(levels(factor(bior@data$bioregio)))){
+    bioregions[[i]] <- bior[bior@data$bioregio==i,]
+    ##aggregate the spatial polygons into one defining the bioregion
+    bioregions[[i]] <- aggregate(bioregions[[i]])
+  }
+
+# clip the sp ranges regarding the bioregion ------------------------------
+  
+  ##checking the polygon validity of bio.ranges
+  bio.ranges <- polygon.validity(bio.ranges)
+  
+  ##checking the polygon validity of bioregions
+  bioregions <- polygon.validity(bioregions)
+  
+  ##empty list for storing the sp ranges clipped by the bioregion
+  bio.sp.clip <- list()
+  
+  ##loop for clipping and storing the sp ranges
+  for(i in 1:length(bioregions)) {
+    ##projection correspondence
+    crs(bio.ranges[[i]]) <-  crs(bioregions[[i]]) 
+    ##clipping and storing
+    bio.sp.clip[[i]] <- gIntersection(bio.ranges[[i]], bioregions[[i]], byid = TRUE, drop_lower_td = TRUE)
+  }
+  
+# crop the weather rasterbrick ---------------------------------------------
+  
+  ##empty list for storing the climatic variables for each bioregion
+  clim.l <- list()
+  
+  ##empty list for storing the highly correlated climatic variables
+  clim.vif <- list()
+  
+  ##loop for cropping and storing the weather of each bioregion
+  for(i in 1:length(bioregions)){
+    clim.l[[i]] <- crop(x = w, y = extent(bioregions[[i]]))
+    ##mask for cropping the exact bioregion form
+    clim.l[[i]] <- mask(clim.l[[i]], bioregions[[i]])
+    ##detecting highly correlated variables
+    clim.vif[[i]] <- vifstep(clim.l[[i]])
+    ##excluding highly correlated variables
+    clim.l[[i]] <- exclude(clim.l[[i]], clim.vif[[i]])
+  }
+  
+
+# ENFA analysis -----------------------------------------------------------
+
+ 
+  ##For realizing an enfa for each species in each bioregions we
+   ##should put each range in a list for facilitating the analysis
+  
+ range.bio.list <-lapply(bio.sp.clip, function(y) iterate(y))
+
+ ###excluding the polygons with area < 0.11
+ range.bio.clean <- lapply(range.bio.list, function(x) exclude.polygons(x))
+ 
+ ##The sp which must be excluded 
+ sp.ex <- lapply(sp.bio.list, function(x) exclude.sp(x)) 
+ 
+ ##empty list for storing the species names
+ bio.sp.clean <- list()
+ ##loop for removing species excluded
+ for(i in seq_along(bio.species)){
+   if(length(sp.ex.1[[i]])==0){
+     bio.sp.clean[[i]] <- bio.species[[i]]
+   } else {
+     bio.sp.clean[[i]] <- bio.species[[i]][-sp.ex[[i]],]
+   }
+ }
+ 
+ ##enfa  
+ 
+  ##empty list for storing the enfa results for each species in each bioregion
+  enfa.bio <- list()
+  
+  ##loop for performing the enfa analysis
+  for(i in 1:length(range.bio.clean)){
+    enfa.bio[[i]] <- lapply(range.bio.clean[[i]], function(y) enfa(x = clim.l[[i]],
+                                                      s.dat = y,  parallel = TRUE, n = 3))
+  }
+
+
+# list storing the principal results of ENFA ------------------------------
+
+##empty vector for storing the results
+  output.l <- list()
+
+  for(j in 1:length(enfa.bio)){
+    
+    output.l[[j]] <- data.frame(matrix(NA, nrow = length(enfa.bio[[j]]), ncol = 4))
+    colnames(output.l[[j]]) <- c("bioregion", "species", "marginality", "specialization")
+    for(i in 1:length(enfa.bio[[j]])){
+      output.l[[j]][i,1] <- paste0("bio", j)
+      output.l[[j]][i,2] <- bio.sp.clean[[j]][i,1]
+      output.l[[j]][i,3] <- enfa.bio[[j]][[i]]@marginality
+      output.l[[j]][i,4] <- enfa.bio[[j]][[i]]@specialization
+    }
+    
+  }  
+
+  results <- do.call("rbind", output.l)
+  return(results)
+}
