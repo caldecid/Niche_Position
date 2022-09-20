@@ -91,6 +91,10 @@ dsm.climate.vectorized <- function(realm, dsm, w){
   ###aggregating for dissolving the polygons of repeated species
   dsm.ag <- aggregate(dsm.simple.data, by = "BINOMIAL")
   
+  ##saving the output
+  save(list(clim.l, dsm.ag), 
+       file = paste0(as.character(dsm), "climate", ".RData"))
+  
   ##returning the climate and dsm
   return(list(clim.l, dsm.ag))
 }
