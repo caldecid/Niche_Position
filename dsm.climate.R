@@ -1,7 +1,5 @@
 # Function for cleaning and formating dsm and climate ---------------------
 
-
-
 ##package
 library(ape)
 library(sf)
